@@ -1,0 +1,144 @@
+name: Build & Release APK on Tag
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag or version name (e.g. v1.0.0)'
+        required: false
+        default: ''
+      release_title:
+        description: 'Custom Release Title (optional)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Publish Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare Build Environment & Keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          # Ensure .env exists for the Secrets Gradle Plugin
+          if [ ! -f .env ]; then
+            echo "Creating .env from .env.example..."
+            cp .env.example .env
+          fi
+
+          # Decode base64 debug.keystore if available and not present
+          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
+            echo "Decoding debug.keystore..."
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+
+          # If custom production release keystore is provided via GitHub Secrets, decode it
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "Decoding custom production release keystore from secrets..."
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+          fi
+
+          # Ensure gradlew has executable permissions
+          chmod +x gradlew
+
+      - name: Build APKs with Gradle
+        env:
+          KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease assembleDebug --no-daemon --stacktrace
+
+      - name: Prepare Artifacts & Calculate Checksums
+        id: prepare_artifacts
+        run: |
+          # Determine tag or version
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+          mkdir -p release_assets
+
+          # Locate Release APK
+          RELEASE_APK=$(find app/build/outputs/apk/release -type f -name "*.apk" | head -n 1)
+          if [ -f "$RELEASE_APK" ]; then
+            TARGET_RELEASE="release_assets/Jarvis-AI-${TAG}-release.apk"
+            cp "$RELEASE_APK" "$TARGET_RELEASE"
+            echo "Copied release APK to $TARGET_RELEASE"
+          fi
+
+          # Locate Debug APK
+          DEBUG_APK=$(find app/build/outputs/apk/debug -type f -name "*.apk" | head -n 1)
+          if [ -f "$DEBUG_APK" ]; then
+            TARGET_DEBUG="release_assets/Jarvis-AI-${TAG}-debug.apk"
+            cp "$DEBUG_APK" "$TARGET_DEBUG"
+            echo "Copied debug APK to $TARGET_DEBUG"
+          fi
+
+          # Generate SHA256 checksums
+          cd release_assets
+          sha256sum *.apk > SHA256SUMS.txt
+          cd ..
+
+          echo "Assets ready for release:"
+          ls -la release_assets/
+
+      - name: Determine Pre-release Status
+        id: check_prerelease
+        run: |
+          if [[ "${{ env.TAG }}" =~ -(beta|alpha|rc|preview) ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ github.event.inputs.release_title != '' && github.event.inputs.release_title || format('Jarvis AI {0}', env.TAG) }}
+          files: |
+            release_assets/*.apk
+            release_assets/SHA256SUMS.txt
+          draft: false
+          prerelease: ${{ steps.check_prerelease.outputs.is_prerelease == 'true' }}
+          generate_release_notes: true
+          body: |
+            ### 🤖 Jarvis AI Assistant - Automated Release (${{ env.TAG }})
+
+            #### 📦 Included Binaries:
+            - **`Jarvis-AI-${{ env.TAG }}-release.apk`**: Production release APK.
+            - **`Jarvis-AI-${{ env.TAG }}-debug.apk`**: Debug build for testing and logcat inspection.
+            - **`SHA256SUMS.txt`**: Cryptographic verification checksums.
+
+            #### 🚀 How to Install on Android:
+            1. Download `Jarvis-AI-${{ env.TAG }}-release.apk` onto your Android phone.
+            2. Open the downloaded file and allow installation from unknown sources if prompted.
+            3. Grant required permissions (Microphone for Live Voice, Notification Access for smart reply, and Accessibility for screen reading).
+            4. Add your Gemini API Key in App Settings to activate Gemini Live Voice Calling!

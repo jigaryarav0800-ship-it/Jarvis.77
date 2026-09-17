@@ -1,0 +1,6 @@
+{
+  "name": "Jarvis AI",
+  "description": "Jarvis-powered phone automation and Gemini live voice controller for calling, messaging, screen assistance, and deep device control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
