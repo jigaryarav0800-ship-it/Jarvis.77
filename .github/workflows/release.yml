@@ -34,42 +34,40 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+          cache: 'gradle'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Prepare Build Environment & Keystore
+      - name: Prepare Secrets & Keystores
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
-          # Ensure .env exists for the Secrets Gradle Plugin
+          # 1. Provide .env from .env.example if not present (required by secrets gradle plugin)
           if [ ! -f .env ]; then
             echo "Creating .env from .env.example..."
             cp .env.example .env
           fi
 
-          # Decode base64 debug.keystore if available, or generate a valid keystore
+          # 2. Decode or generate a valid debug.keystore
           if [ ! -f debug.keystore ]; then
             if [ -f debug.keystore.base64 ]; then
-              echo "Decoding debug.keystore from base64..."
+              echo "Decoding debug.keystore from debug.keystore.base64..."
               base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || true
             fi
             if [ ! -f debug.keystore ] || [ ! -s debug.keystore ]; then
-              echo "Generating valid fallback debug.keystore..."
+              echo "Generating valid fallback debug.keystore with keytool..."
               keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
             fi
           fi
 
-          # If custom production release keystore is provided via GitHub Secrets, decode it
+          # 3. Decode custom release keystore if provided in GitHub Secrets
           if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
             echo "Decoding custom production release keystore from secrets..."
             echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
           fi
 
-          # Ensure gradlew has executable permissions
+          # 4. Make gradlew executable
           chmod +x gradlew
 
       - name: Build APKs with Gradle
@@ -84,13 +82,13 @@ jobs:
       - name: Prepare Artifacts & Calculate Checksums
         id: prepare_artifacts
         run: |
-          # Determine tag or version cleanly
+          # Determine tag or version
           if [ -n "${{ github.event.inputs.tag_name }}" ]; then
             TAG="${{ github.event.inputs.tag_name }}"
           elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF_NAME}"
           else
-            TAG="v1.0.0-$(date +'%Y%m%d%H%M')"
+            TAG="v1.0.0"
           fi
           echo "TAG=$TAG" >> $GITHUB_ENV
 
@@ -112,15 +110,17 @@ jobs:
             echo "Copied debug APK to $TARGET_DEBUG"
           fi
 
-          # Generate SHA256 checksums
+          # Generate SHA256 checksums if APKs exist
           cd release_assets
-          sha256sum *.apk > SHA256SUMS.txt
+          if ls *.apk 1> /dev/null 2>&1; then
+            sha256sum *.apk > SHA256SUMS.txt
+          fi
           cd ..
 
-          echo "Assets ready for release:"
+          echo "Prepared assets:"
           ls -la release_assets/
 
-      - name: Upload APKs to GitHub Actions Artifacts
+      - name: Upload APKs to Workflow Artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
