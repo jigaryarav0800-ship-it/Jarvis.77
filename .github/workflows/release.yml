@@ -29,11 +29,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -48,10 +51,16 @@ jobs:
             cp .env.example .env
           fi
 
-          # Decode base64 debug.keystore if available and not present
-          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
-            echo "Decoding debug.keystore..."
-            base64 -d debug.keystore.base64 > debug.keystore
+          # Decode base64 debug.keystore if available, or generate a valid keystore
+          if [ ! -f debug.keystore ]; then
+            if [ -f debug.keystore.base64 ]; then
+              echo "Decoding debug.keystore from base64..."
+              base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || true
+            fi
+            if [ ! -f debug.keystore ] || [ ! -s debug.keystore ]; then
+              echo "Generating valid fallback debug.keystore..."
+              keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            fi
           fi
 
           # If custom production release keystore is provided via GitHub Secrets, decode it
@@ -75,11 +84,13 @@ jobs:
       - name: Prepare Artifacts & Calculate Checksums
         id: prepare_artifacts
         run: |
-          # Determine tag or version
+          # Determine tag or version cleanly
           if [ -n "${{ github.event.inputs.tag_name }}" ]; then
             TAG="${{ github.event.inputs.tag_name }}"
-          else
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v1.0.0-$(date +'%Y%m%d%H%M')"
           fi
           echo "TAG=$TAG" >> $GITHUB_ENV
 
@@ -109,6 +120,14 @@ jobs:
           echo "Assets ready for release:"
           ls -la release_assets/
 
+      - name: Upload APKs to GitHub Actions Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jarvis-ai-apks-${{ env.TAG }}
+          path: release_assets/
+          if-no-files-found: warn
+
       - name: Determine Pre-release Status
         id: check_prerelease
         run: |
@@ -120,8 +139,11 @@ jobs:
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
           name: ${{ github.event.inputs.release_title != '' && github.event.inputs.release_title || format('Jarvis AI {0}', env.TAG) }}
           files: |
             release_assets/*.apk
